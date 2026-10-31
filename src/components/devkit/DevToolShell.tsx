@@ -15,6 +15,7 @@ export default function DevToolShell({ slug, children }: { slug: string; childre
         <p className="mt-5 text-xs uppercase tracking-widest text-text-muted">{tool.category}</p>
         <h1 className="mt-2 text-3xl font-semibold sm:text-4xl">{tool.name}</h1>
         <p className="mt-3 text-text-secondary">{tool.description}</p>
+        <p className="mt-3 text-xs text-text-muted">Processing happens in your browser. Tool inputs are not submitted to BugShala.</p>
       </div>
       {children}
     </div>

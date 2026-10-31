@@ -50,30 +50,52 @@ function jsonToType(value: unknown, name = 'Root', seen = new Set<string>(), mod
 }
 
 function makeTypeScript(value: unknown, rootName: string, mode: 'interface' | 'type') {
-  function render(value: unknown, name: string, depth = 0): string {
+  function render(value: unknown, depth = 0, optionalKeys: Set<string> = new Set(), name = 'Root'): string {
     if (Array.isArray(value)) {
       if (!value.length) return 'unknown[]'
-      return `${render(value[0], name, depth)}[]`
+      const objects = value.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+      let item: unknown
+      if (objects.length === value.length && objects.length) {
+        item = objects.reduce<Record<string, unknown>>((merged, object) => {
+          Object.keys(object).forEach(key => {
+            merged[key] = merged[key] === undefined ? object[key] : [merged[key], object[key]]
+          })
+          return merged
+        }, {})
+      } else {
+        item = [...new Set(value.map(entry => typeof entry))].length === 1 ? value[0] : value.filter(entry => entry !== null).map(entry => entry)[0] ?? value[0]
+      }
+      return `${render(item, depth, new Set(), name)}[]`
     }
     if (!value || typeof value !== 'object') return value === null ? 'unknown' : typeof value
     const indent = '  '.repeat(depth + 1)
     const entries = Object.entries(value as Record<string, unknown>)
     const lines = entries.map(([key, item]) => {
       const safeKey = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(key)
-      const nestedName = `${typeName(name)}${typeName(key)}`
-      if (item && typeof item === 'object' && !Array.isArray(item)) {
-        const nested = render(item, nestedName, depth + 1)
-        return `${indent}${safeKey}: {\n${nested.replace(/^/gm, indent)}\n${indent}}`
-      }
+      const optional = optionalKeys.has(key) ? '?' : ''
       if (Array.isArray(item)) {
-        const itemType = item.length ? render(item[0], nestedName, depth + 1) : 'unknown'
-        return `${indent}${safeKey}: ${itemType}[]`
+        const objects = item.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object' && !Array.isArray(entry))
+        let itemType = 'unknown[]'
+        if (objects.length === item.length && objects.length) {
+          const merged = objects.reduce<Record<string, unknown>>((result, object) => {
+            Object.keys(object).forEach(objectKey => {
+              if (!(objectKey in result)) result[objectKey] = object[objectKey]
+            })
+            return result
+          }, {})
+          const optionalItems = new Set(Object.keys(merged).filter(objectKey => objects.some(object => !(objectKey in object))))
+          itemType = `{\n${render(merged, depth + 1, optionalItems).split('\n').map(line => `${indent}${line}`).join('\n')}\n${indent}}[]`
+        } else if (item.length) {
+          itemType = `${render(item[0], depth + 1)}[]`
+        }
+        return `${indent}${safeKey}${optional}: ${itemType}`
       }
-      return `${indent}${safeKey}: ${item === null ? 'unknown' : typeof item}`
+      if (item && typeof item === 'object') return `${indent}${safeKey}: ${render(item, depth + 1)}`
+      return `${indent}${safeKey}${optional}: ${item === null ? 'unknown' : typeof item}`
     })
     return lines.join('\n')
   }
-  const parsed = render(value, rootName)
+  const parsed = render(value)
   if (Array.isArray(value) || !value || typeof value !== 'object') return `${mode === 'interface' ? 'type' : 'type'} ${rootName} = ${parsed}`
   return mode === 'interface'
     ? `export interface ${rootName} {\n${parsed}\n}`
@@ -85,10 +107,15 @@ function base64Encode(value: string) {
 }
 
 function base64Decode(value: string) {
-  const binary = atob(value.replace(/\s/g, ''))
+  const normalized = value.replace(/\s/g, '')
+  if (!normalized || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 !== 0) {
+    throw new Error('Enter valid Base64 with groups of 4 characters.')
+  }
+  const binary = atob(normalized)
   const bytes = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
-  return new TextDecoder().decode(bytes)
+  const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  return decoded
 }
 
 function decodeJwtPart(value: string) {
@@ -124,6 +151,51 @@ function rgbToHsl(r: number, g: number, b: number) {
   return { h: Math.round(h), s: Math.round(s * 100), l: Math.round(l * 100) }
 }
 
+function parseCssColor(input: string): { r: number; g: number; b: number; a: number } {
+  const value = input.trim().toLowerCase()
+  if (value.startsWith('#')) {
+    const [r, g, b] = hexToRgb(value)
+    return { r, g, b, a: 1 }
+  }
+  const functional = value.match(/^((?:rgb|rgba|hsl|hsla))\(\s*(.+)\s*\)$/)
+  if (!functional) throw new Error('Enter HEX, RGB(A), or HSL(A).')
+  const kind = functional[1]
+  const parts = functional[2].split(/[,\s\/]+/).filter(Boolean)
+  if ((kind.startsWith('rgb')) && parts.length >= 3) {
+    const numbers = parts.slice(0, 3).map(part => {
+      const number = Number(part)
+      if (!Number.isFinite(number) || number < 0 || number > 255) throw new Error('RGB channels must be between 0 and 255.')
+      return number
+    })
+    const alpha = parts.length > 3 ? parseFloat(parts[3]) : 1
+    if (!Number.isFinite(alpha) || alpha < 0 || alpha > 1) throw new Error('Alpha must be between 0 and 1.')
+    return { r: numbers[0], g: numbers[1], b: numbers[2], a: alpha }
+  }
+  if (kind.startsWith('hsl') && parts.length >= 3) {
+    const hue = parseFloat(parts[0])
+    const saturation = parseFloat(parts[1])
+    const lightness = parseFloat(parts[2])
+    const alpha = parts.length > 3 ? parseFloat(parts[3]) : 1
+    if (!Number.isFinite(hue) || hue < 0 || hue > 360 || !Number.isFinite(saturation) || saturation < 0 || saturation > 100 || !Number.isFinite(lightness) || lightness < 0 || lightness > 100 || !Number.isFinite(alpha) || alpha < 0 || alpha > 1) throw new Error('Use HSL hue 0-360, saturation/lightness 0-100, and alpha 0-1.')
+    const h = hue / 360
+    const s = saturation / 100
+    const l = lightness / 100
+    const hueToRgb = (p: number, q: number, t: number) => {
+      let n = t
+      if (n < 0) n += 1
+      if (n > 1) n -= 1
+      if (n < 1 / 6) return p + (q - p) * 6 * n
+      if (n < 1 / 2) return q
+      if (n < 2 / 3) return p + (q - p) * (2 / 3 - n) * 6
+      return p
+    }
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+    const p = 2 * l - q
+    return { r: Math.round(hueToRgb(p, q, h + 1 / 3) * 255), g: Math.round(hueToRgb(p, q, h) * 255), b: Math.round(hueToRgb(p, q, h - 1 / 3) * 255), a: alpha }
+  }
+  throw new Error('Enter a valid RGB(A) or HSL(A) color.')
+}
+
 export default function DevKitTool({ slug }: { slug: string }) {
   const [input, setInput] = useState('')
   const [output, setOutput] = useState('')
@@ -135,6 +207,7 @@ export default function DevKitTool({ slug }: { slug: string }) {
   const [regexPattern, setRegexPattern] = useState('')
   const [regexMatches, setRegexMatches] = useState('')
   const [timestamp, setTimestamp] = useState('')
+  const [timestampUnit, setTimestampUnit] = useState<'seconds' | 'milliseconds' | 'automatic'>('automatic')
   const [dateValue, setDateValue] = useState('')
   const [uuidCount, setUuidCount] = useState(5)
   const [language, setLanguage] = useState('json')
@@ -150,9 +223,15 @@ export default function DevKitTool({ slug }: { slug: string }) {
 
   const colorFormats = useMemo(() => {
     try {
-      const [r, g, b] = hexToRgb(color)
+      const { r, g, b, a } = parseCssColor(color)
       const hsl = rgbToHsl(r, g, b)
-      return { hex: color.startsWith('#') ? color.toUpperCase() : `#${color.toUpperCase()}`, rgb: `rgb(${r}, ${g}, ${b})`, hsl: `hsl(${hsl.h}, ${hsl.s}%, ${hsl.l}%)`, error: '' }
+      const hex = `#${[r, g, b].map(channel => channel.toString(16).padStart(2, '0')).join('').toUpperCase()}`
+      return {
+        hex,
+        rgb: a === 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${a})`,
+        hsl: a === 1 ? `hsl(${hsl.h}, ${hsl.s}%, ${hsl.l}%)` : `hsla(${hsl.h}, ${hsl.s}%, ${hsl.l}%, ${a})`,
+        error: '',
+      }
     } catch (caught) {
       return { hex: '', rgb: '', hsl: '', error: caught instanceof Error ? caught.message : 'Invalid color.' }
     }
@@ -165,7 +244,7 @@ export default function DevKitTool({ slug }: { slug: string }) {
         case 'json-formatter': {
           if (!input.trim()) throw new Error('Enter JSON to format or validate.')
           const parsed = JSON.parse(input)
-          setOutput(JSON.stringify(parsed, null, Number(indent) || 2))
+          setOutput(JSON.stringify(parsed, null, indent === '\t' ? '\t' : Number(indent) || 2))
           break
         }
         case 'json-to-typescript': {
@@ -178,34 +257,52 @@ export default function DevKitTool({ slug }: { slug: string }) {
           break
         }
         case 'url-encoder': {
-          setOutput(encodeURIComponent(input))
+          if (!input.length) throw new Error('Enter text to URL-encode.')
+          try {
+            setOutput(encodeURIComponent(input))
+          } catch {
+            throw new Error('The input contains an incomplete Unicode surrogate and cannot be encoded.')
+          }
           break
         }
         case 'regex-tester': {
+          if (!regexPattern) throw new Error('Enter a regular expression.')
           const WorkerSource = `
             self.onmessage = function(event) {
               const { pattern, flags, text } = event.data;
               try {
                 const regex = new RegExp(pattern, flags);
-                const matches = [...text.slice(0, 100000).matchAll(regex)].slice(0, 500).map(match => ({
-                  value: match[0], index: match.index, groups: match.slice(1)
-                }));
+                const matches = [];
+                let match;
+                while ((match = regex.exec(text.slice(0, 100000))) && matches.length < 500) {
+                  matches.push({
+                    value: match[0], index: match.index, groups: match.slice(1),
+                    namedGroups: match.groups ?? {}
+                  });
+                  if (!regex.global) break;
+                  if (match[0] === '') regex.lastIndex += 1;
+                }
                 self.postMessage({ matches });
               } catch (error) { self.postMessage({ error: error.message }); }
             };
           `
           const url = URL.createObjectURL(new Blob([WorkerSource], { type: 'text/javascript' }))
+          if (typeof Worker === 'undefined') {
+            URL.revokeObjectURL(url)
+            throw new Error('Web Workers are unavailable in this browser. Regex testing cannot run safely.')
+          }
           const worker = new Worker(url)
-          URL.revokeObjectURL(url)
+          window.setTimeout(() => URL.revokeObjectURL(url), 0)
           const timeout = window.setTimeout(() => {
             worker.terminate()
+            setRegexMatches('')
             setError('Regex execution timed out. Try a simpler pattern.')
           }, 500)
           worker.onmessage = event => {
             window.clearTimeout(timeout)
             worker.terminate()
             if (event.data.error) setError(event.data.error)
-            else setRegexMatches(`${event.data.matches.length} match${event.data.matches.length === 1 ? '' : 'es'}\n${event.data.matches.map((match: { value: string; index: number; groups: string[] }) => `${match.index}: ${match.value}${match.groups.length ? ` — groups: ${match.groups.join(', ')}` : ''}`).join('\n')}`)
+            else setRegexMatches(`${event.data.matches.length} match${event.data.matches.length === 1 ? '' : 'es'}${event.data.matches.length ? '\n' : ''}${event.data.matches.map((match: { value: string; index: number; groups: string[]; namedGroups: Record<string, string> }) => `${match.index}: ${match.value}${match.groups.length ? ` — groups: ${match.groups.join(', ')}` : ''}${Object.keys(match.namedGroups).length ? ` — named: ${JSON.stringify(match.namedGroups)}` : ''}`).join('\n')}`)
           }
           worker.postMessage({ pattern: regexPattern, flags: regexFlags, text: input })
           break
@@ -221,12 +318,16 @@ export default function DevKitTool({ slug }: { slug: string }) {
           break
         }
         case 'code-formatter': {
+          if (!input.trim()) throw new Error(`Enter ${language.toUpperCase()} code to format.`)
           const prettier = await import('prettier/standalone')
           const plugins: unknown[] = []
           let parser = language
           if (language === 'html') plugins.push((await import('prettier/plugins/html')).default)
           if (language === 'css') plugins.push((await import('prettier/plugins/postcss')).default)
-          if (language === 'json') parser = 'json'
+          if (language === 'json') {
+            parser = 'json'
+            plugins.push((await import('prettier/plugins/babel')).default, (await import('prettier/plugins/estree')).default)
+          }
           if (language === 'javascript') plugins.push((await import('prettier/plugins/babel')).default, (await import('prettier/plugins/estree')).default)
           setOutput(await prettier.format(input, { parser: parser === 'javascript' ? 'babel' : parser, plugins: plugins as never[], tabWidth: Number(indent) }))
           break
@@ -241,11 +342,27 @@ export default function DevKitTool({ slug }: { slug: string }) {
     setError('')
     try {
       if (action === 'decodeBase64') setOutput(base64Decode(input))
-      if (action === 'decodeUrl') setOutput(decodeURIComponent(input))
+      if (action === 'decodeUrl') {
+        if (!input) throw new Error('Enter encoded text to URL-decode.')
+        if (/%(?![0-9a-fA-F]{2})/.test(input)) throw new Error('Malformed percent escape. Use % followed by two hexadecimal digits.')
+        setOutput(decodeURIComponent(input))
+      }
       if (action === 'decodeJwt') {
         const parts = input.trim().split('.')
         if (parts.length !== 3) throw new Error('A JWT must contain three dot-separated parts.')
-        setOutput(`HEADER\n${decodeJwtPart(parts[0])}\n\nPAYLOAD\n${decodeJwtPart(parts[1])}`)
+        const header = decodeJwtPart(parts[0])
+        const payload = decodeJwtPart(parts[1])
+        const claims = JSON.parse(payload) as { exp?: unknown; nbf?: unknown }
+        const nowSeconds = Math.floor(Date.now() / 1000)
+        const warnings = [
+          claims.exp !== undefined && (!Number.isFinite(Number(claims.exp)) || Number(claims.exp) < nowSeconds)
+            ? `Token is expired${Number.isFinite(Number(claims.exp)) ? ` (exp ${new Date(Number(claims.exp) * 1000).toISOString()})` : '.'}`
+            : '',
+          claims.nbf !== undefined && Number.isFinite(Number(claims.nbf)) && Number(claims.nbf) > nowSeconds
+            ? 'Token is not yet valid (nbf is in the future).'
+            : '',
+        ].filter(Boolean)
+        setOutput(`HEADER\n${header}\n\nPAYLOAD\n${payload}${warnings.length ? `\n\nCLAIM STATUS\n${warnings.join('\n')}` : ''}`)
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Invalid input.')
@@ -255,10 +372,11 @@ export default function DevKitTool({ slug }: { slug: string }) {
   async function hashAlgorithm(algorithm: 'SHA-256' | 'SHA-384' | 'SHA-512') {
     setError('')
     try {
+      if (!globalThis.crypto?.subtle) throw new Error('Web Crypto hashing is unavailable in this browser or connection. Use a modern browser on HTTPS or localhost.')
       const digest = await crypto.subtle.digest(algorithm, new TextEncoder().encode(input))
       setOutput([...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join(''))
-    } catch {
-      setError('This browser does not support Web Crypto hashing.')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'This browser does not support Web Crypto hashing.')
     }
   }
 
@@ -274,7 +392,7 @@ export default function DevKitTool({ slug }: { slug: string }) {
   return (
     <>
       {slug === 'json-formatter' && (
-        <div className="mb-4 flex items-center gap-3 text-sm"><label>Indentation</label><select className="rounded-md border border-border bg-bg-surface px-3 py-2" value={indent} onChange={event => setIndent(event.target.value)}><option value="2">2 spaces</option><option value="4">4 spaces</option><option value="\t">Tab</option></select></div>
+        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm"><label htmlFor="json-indent">Indentation</label><select id="json-indent" className="rounded-md border border-border bg-bg-surface px-3 py-2" value={indent} onChange={event => setIndent(event.target.value)}><option value="2">2 spaces</option><option value="4">4 spaces</option><option value="\t">Tab</option></select><Button onClick={() => { try { if (!input.trim()) throw new Error('Enter JSON to format or validate.'); setOutput(JSON.stringify(JSON.parse(input))); setError('') } catch (caught) { setError(caught instanceof Error ? caught.message : 'Invalid JSON.') } }}>Minify JSON</Button></div>
       )}
       {slug === 'json-to-typescript' && (
         <div className="mb-4 grid gap-3 sm:grid-cols-2"><input aria-label="Root type name" className="rounded-md border border-border bg-bg-surface px-3 py-2" value={rootName} onChange={event => setRootName(event.target.value)} /><select aria-label="Type style" className="rounded-md border border-border bg-bg-surface px-3 py-2" value={typeMode} onChange={event => setTypeMode(event.target.value as 'interface' | 'type')}><option value="interface">Interface</option><option value="type">Type alias</option></select></div>
@@ -303,20 +421,40 @@ export default function DevKitTool({ slug }: { slug: string }) {
             <div><div className="min-h-[220px] rounded-card border border-border" style={{ background: gradient }} /><textarea readOnly className={`${outputClass} mt-4`} value={`background: ${gradient};`} /><Button onClick={() => copyText(`background: ${gradient};`)}>Copy CSS</Button></div>
           </>}
           {slug === 'color-converter' && <>
-            <div className="rounded-card border border-border bg-bg-surface p-4"><label className="text-xs text-text-muted">HEX color</label><input className="mt-2 w-full rounded-md border border-border bg-bg-elevated px-3 py-2 font-mono" value={color} onChange={e => setColor(e.target.value)} /><div className="mt-5 h-44 rounded-card border border-border" style={{ background: colorFormats.error ? 'transparent' : colorFormats.hex }} /></div>
+            <div className="rounded-card border border-border bg-bg-surface p-4"><label htmlFor="color-input" className="text-xs text-text-muted">Color value</label><input id="color-input" aria-label="Color value" className="mt-2 w-full rounded-md border border-border bg-bg-elevated px-3 py-2 font-mono" value={color} onChange={e => setColor(e.target.value)} /><div className="mt-5 h-44 rounded-card border border-border" style={{ background: colorFormats.error ? 'transparent' : colorFormats.hex }} /></div>
             <div className="space-y-3">{['hex', 'rgb', 'hsl'].map(format => <div key={format} className="flex items-center justify-between rounded-card border border-border bg-bg-surface p-4"><div><p className="text-xs uppercase text-text-muted">{format}</p><code>{colorFormats[format as 'hex' | 'rgb' | 'hsl']}</code></div><Button onClick={() => copyText(colorFormats[format as 'hex' | 'rgb' | 'hsl'])}>Copy</Button></div>)}{colorFormats.error && <p className="text-sm text-red-300">{colorFormats.error}</p>}</div>
           </>}
         </div>
       ) : slug === 'timestamp' ? (
         <div className="grid gap-4 rounded-card border border-border bg-bg-surface p-5 md:grid-cols-2">
-          <div><label className="text-sm">Unix timestamp</label><input className="mt-2 w-full rounded-md border border-border bg-bg-elevated px-3 py-2 font-mono" value={timestamp} onChange={e => setTimestamp(e.target.value)} /><Button onClick={() => { const number = Number(timestamp); const milliseconds = timestamp.length > 10 ? number : number * 1000; const date = new Date(milliseconds); setOutput(isNaN(date.getTime()) ? '' : `${date.toUTCString()}\n${date.toString()}`); setError(isNaN(date.getTime()) ? 'Invalid Unix timestamp.' : '') }}>Convert</Button></div>
-          <div><label className="text-sm">Date and time</label><input className="mt-2 w-full rounded-md border border-border bg-bg-elevated px-3 py-2" type="datetime-local" value={dateValue} onChange={e => setDateValue(e.target.value)} /><Button onClick={() => { const date = new Date(dateValue); const value = date.getTime(); setOutput(isNaN(value) ? '' : `${Math.floor(value / 1000)} seconds\n${value} milliseconds`); setError(isNaN(value) ? 'Invalid date.' : '') }}>Convert</Button></div>
+          <div>
+            <label htmlFor="timestamp-unit" className="text-sm">Timestamp unit</label>
+            <select id="timestamp-unit" aria-label="Timestamp unit" className="mt-2 mb-3 w-full rounded-md border border-border bg-bg-elevated px-3 py-2" value={timestampUnit} onChange={e => setTimestampUnit(e.target.value as typeof timestampUnit)}>
+              <option value="seconds">Seconds</option>
+              <option value="milliseconds">Milliseconds</option>
+              <option value="automatic">Automatic detection (advisory)</option>
+            </select>
+            <label htmlFor="unix-timestamp" className="text-sm">Unix timestamp</label>
+            <input id="unix-timestamp" className="mt-2 w-full rounded-md border border-border bg-bg-elevated px-3 py-2 font-mono" value={timestamp} onChange={e => setTimestamp(e.target.value)} />
+            <Button onClick={() => {
+              const text = timestamp.trim()
+              if (!text) { setOutput(''); setError('Enter a Unix timestamp. Empty input is not the Unix epoch.'); return }
+              if (!/^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) { setOutput(''); setError('Enter a numeric Unix timestamp.'); return }
+              const number = Number(text)
+              const milliseconds = timestampUnit === 'seconds' ? number * 1000 : timestampUnit === 'milliseconds' ? number : Math.abs(number) >= 100000000000 ? number : number * 1000
+              const date = new Date(milliseconds)
+              if (!Number.isFinite(date.getTime())) { setOutput(''); setError('The timestamp is outside JavaScript Date range.'); return }
+              setOutput(`UTC: ${date.toISOString()}\nLocal: ${date.toString()}${timestampUnit === 'automatic' ? '\nAutomatic unit detection is advisory; choose the unit explicitly when known.' : ''}`)
+              setError('')
+            }}>Convert</Button>
+          </div>
+          <div><label className="text-sm">Date and time</label><input className="mt-2 w-full rounded-md border border-border bg-bg-elevated px-3 py-2" type="datetime-local" value={dateValue} onChange={e => setDateValue(e.target.value)} /><Button onClick={() => { if (!dateValue) { setOutput(''); setError('Choose a date and time.'); return } const date = new Date(dateValue); const value = date.getTime(); setOutput(isNaN(value) ? '' : `${Math.floor(value / 1000)} seconds\n${value} milliseconds`); setError(isNaN(value) ? 'Invalid date.' : '') }}>Convert</Button></div>
           <textarea readOnly aria-label="Timestamp result" className={`${outputClass} md:col-span-2`} value={output} />
         </div>
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
-          <div><label className="mb-2 block text-xs text-text-muted">Input</label><textarea className={inputClass} value={input} onChange={event => setInput(event.target.value)} spellCheck={false} /></div>
-          <div><label className="mb-2 block text-xs text-text-muted">{slug === 'regex-tester' ? 'Matches' : 'Output'}</label><textarea readOnly className={outputClass} value={slug === 'regex-tester' ? regexMatches : output} spellCheck={false} /></div>
+          <div><label htmlFor="devkit-input" className="mb-2 block text-xs text-text-muted">Input</label><textarea id="devkit-input" aria-label="Input" className={inputClass} value={input} onChange={event => setInput(event.target.value)} spellCheck={false} /></div>
+          <div><label htmlFor="devkit-output" className="mb-2 block text-xs text-text-muted">{slug === 'regex-tester' ? 'Matches' : 'Output'}</label><textarea id="devkit-output" aria-label={slug === 'regex-tester' ? 'Matches' : 'Output'} readOnly className={outputClass} value={slug === 'regex-tester' ? regexMatches : output} spellCheck={false} /></div>
           <div className="lg:col-span-2">
             {error && <p role="alert" className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{error}</p>}
             {slug === 'base64' && <div className="mb-4 flex gap-2"><Button onClick={() => void run()}>Encode</Button><Button onClick={() => void decode('decodeBase64')}>Decode</Button></div>}

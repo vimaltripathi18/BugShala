@@ -1,7 +1,19 @@
 'use client'
 
 export async function copyText(value: string) {
-  await navigator.clipboard.writeText(value)
+  if (!value) return
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value)
+    return
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  document.execCommand('copy')
+  textarea.remove()
 }
 
 export function downloadText(filename: string, value: string, type = 'text/plain') {
@@ -10,5 +22,6 @@ export function downloadText(filename: string, value: string, type = 'text/plain
   anchor.href = url
   anchor.download = filename
   anchor.click()
-  URL.revokeObjectURL(url)
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
