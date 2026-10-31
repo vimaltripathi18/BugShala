@@ -1,0 +1,2 @@
+import PageLayout from '@/components/layout/PageLayout'
+export default function PrivacyPage() { return <PageLayout><main className="mx-auto max-w-3xl px-6 py-16"><h1 className="text-4xl font-semibold">Privacy Policy</h1><div className="prose mt-8"><p>BugShala collects only the information needed to operate and improve the service. We do not sell personal data.</p><p>If analytics or database services are enabled, their respective privacy policies apply. You may contact us to request removal of data associated with you.</p></div></main></PageLayout> }

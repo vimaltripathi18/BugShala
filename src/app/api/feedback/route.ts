@@ -1,0 +1,3 @@
+import { NextResponse } from 'next/server'
+import { getServiceClient } from '@/lib/database/supabase'
+export async function POST(request: Request) { const body = await request.json().catch(() => null); if (!body?.bug_id || !['helpful', 'not_helpful'].includes(body.feedback_type)) return NextResponse.json({ error: 'Invalid feedback' }, { status: 400 }); const client = getServiceClient(); if (client) { const column = body.feedback_type === 'helpful' ? 'helpful_count' : 'not_helpful_count'; await client.rpc('increment_bug_feedback', { bug_id_input: body.bug_id, counter_column: column }); } return NextResponse.json({ success: true }) }
