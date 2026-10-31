@@ -9,7 +9,7 @@ export interface ArenaChallenge {
   difficulty: 'beginner' | 'intermediate' | 'advanced' | 'expert'
   language: string
   starter_code: string
-  solution_code: string
+  solution_code?: string
   explanation: string
   estimated_minutes: number | null
   technology?: { name: string; slug: string } | null
@@ -17,6 +17,9 @@ export interface ArenaChallenge {
   related_bug_id?: string | null
   hints?: Array<{ sequence: number; hint: string }>
   public_tests?: Array<{ title: string; stdin: string; expected_output: string }>
+  challenge_type?: string
+  expected_behavior?: string
+  tags?: string[]
 }
 
 export const fallbackChallenges: ArenaChallenge[] = [
@@ -28,7 +31,6 @@ export const fallbackChallenges: ArenaChallenge[] = [
     problem_statement: 'Fix the nested property access so the page renders a loading label until user data is available.',
     difficulty: 'beginner', language: 'javascript',
     starter_code: 'const user = undefined;\nconst name = user.profile.name;\nconsole.log(name);',
-    solution_code: 'const user = undefined;\nconst name = user?.profile?.name ?? "Loading…";\nconsole.log(name);',
     explanation: 'Optional chaining avoids reading properties from nullish values, and nullish coalescing supplies the fallback.',
     estimated_minutes: 10,
     technology: { name: 'JavaScript', slug: 'javascript' },
@@ -46,7 +48,7 @@ export async function getArenaChallenges(): Promise<ArenaChallenge[]> {
   if (!supabase) return fallbackChallenges
   const { data, error } = await supabase
     .from('arena_challenges')
-    .select('*, technology:technologies(name, slug), category:arena_categories(name, slug)')
+    .select('id, title, slug, description, problem_statement, difficulty, language, starter_code, explanation, estimated_minutes, is_published, challenge_type, related_bug_id, technology:technologies(name, slug), category:arena_categories(name, slug)')
     .eq('is_published', true)
     .order('created_at', { ascending: false })
   if (error) return fallbackChallenges
@@ -54,14 +56,28 @@ export async function getArenaChallenges(): Promise<ArenaChallenge[]> {
 }
 
 export async function getArenaChallenge(slug: string): Promise<ArenaChallenge | null> {
-  if (!supabase) return fallbackChallenges.find(challenge => challenge.slug === slug) ?? null
+  if (!supabase) {
+    const challenge = fallbackChallenges.find(challenge => challenge.slug === slug) ?? null
+    if (!challenge) return null
+    const { solution_code: _solution, ...publicChallenge } = challenge
+    return publicChallenge
+  }
   const { data, error } = await supabase
     .from('arena_challenges')
-    .select('*, technology:technologies(name, slug), category:arena_categories(name, slug), hints:arena_hints(sequence, hint), public_tests:arena_test_cases(title, stdin, expected_output)')
+    .select('id, title, slug, description, problem_statement, difficulty, language, starter_code, explanation, estimated_minutes, technology:technologies(name, slug), category:arena_categories(name, slug), related_bug_id, hints:arena_hints(sequence, hint), public_tests:arena_test_cases(title, stdin, expected_output)')
     .eq('slug', slug)
     .eq('is_published', true)
     .eq('arena_test_cases.is_public', true)
     .single()
   if (error) return fallbackChallenges.find(challenge => challenge.slug === slug) ?? null
   return data as unknown as ArenaChallenge
+}
+
+export async function getArenaCategories() {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from('arena_categories')
+    .select('id, name, slug, description')
+    .order('name')
+  return error ? [] : (data ?? [])
 }
